@@ -4,7 +4,9 @@ from copy import copy
 import difflib
 import errno
 from functools import wraps
+import io
 import json
+import logging
 import os
 import re
 import socket
@@ -43,6 +45,8 @@ from django.views.static import serve
 
 __all__ = ('TestCase', 'TransactionTestCase',
            'SimpleTestCase', 'skipIfDBFeature', 'skipUnlessDBFeature')
+
+logger = logging.getLogger('django.request')
 
 
 def to_list(value):
@@ -929,15 +933,38 @@ def skipUnlessDBFeature(feature):
                          "Database doesn't support feature %s" % feature)
 
 
+class LoggingStream(io.TextIOBase):
+    """
+    A stream that writes to the "django.request" logger (sending a new message
+    when each newline is encountered).
+    """
+    def __init__(self, *args, **kwargs):
+        self.buffer = six.StringIO()
+        super(LoggingStream, self).__init__(*args, **kwargs)
+
+    def write(self, s):
+        parts = re.split("([^\n]+)", s)
+        for part in parts:
+            if part == "\n":
+                logger.error(self.buffer.getvalue())
+                self.buffer = six.StringIO()
+            elif part:
+                self.buffer.write(part)
+
+
 class QuietWSGIRequestHandler(WSGIRequestHandler):
     """
     Just a regular WSGIRequestHandler except it doesn't log to the standard
     output any of the requests received, so as to not clutter the output for
-    the tests' results.
+    the tests' results.  Information which is normally logged to standard
+    error or standard output is logged to the "django.request" logger instead.
     """
 
-    def log_message(*args):
-        pass
+    def get_stderr(self):
+        return LoggingStream()
+
+    def log_message(self, format, *args):
+        logger.info("[%s] %s", self.log_date_time_string(), format % args)
 
 
 if sys.version_info >= (3, 3, 0):
@@ -1036,6 +1063,10 @@ class StoppableWSGIServer(WSGIServer):
             except Exception:
                 self.handle_error(request, client_address)
                 self.close_request(request)
+   
+    def handle_error(self, request, client_address):
+        msg = "Exception happened during processing of request from %s"
+        logger.error(msg, client_address, exc_info=sys.exc_info())
 
 
 class _MediaFilesHandler(StaticFilesHandler):
